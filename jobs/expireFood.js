@@ -1,32 +1,46 @@
 const cron = require("node-cron");
-const Food = require("../models/Food");
+const supabase = require("../config/supabase");
 
-// Runs every 30 minutes
+// Runs every 30 minutes — marks expired food in Supabase
 const startExpireJob = () => {
     cron.schedule("*/30 * * * *", async () => {
-        const now = new Date();
-        console.log(`[CronJob] Running food expiry check at ${now.toISOString()}`);
+        const now = new Date().toISOString();
+        console.log(`[CronJob] Running food expiry check at ${now}`);
 
         try {
-            const foods = await Food.find({ hard_expired: false, status: { $ne: "collected" } });
+            // Fetch all non-hard-expired food that hasn't been collected
+            const { data: foods, error } = await supabase
+                .from("foods")
+                .select("id, created_at, expiry_hours, is_expired, hard_expired, status")
+                .eq("hard_expired", false)
+                .neq("status", "collected");
+
+            if (error) throw error;
+
+            const nowMs = Date.now();
 
             for (const food of foods) {
-                const expiry = new Date(food.created_at.getTime() + food.expiry_hours * 60 * 60 * 1000);
-                const hardExpiry = new Date(food.created_at.getTime() + food.expiry_hours * 2 * 60 * 60 * 1000);
+                const createdAt = new Date(food.created_at).getTime();
+                const expiryMs = food.expiry_hours * 60 * 60 * 1000;
+                const softExpiry = createdAt + expiryMs;
+                const hardExpiry = createdAt + expiryMs * 2;
 
-                if (now >= hardExpiry) {
-                    food.hard_expired = true;
-                    food.realtime_status = "Not Available";
-                    await food.save();
-                    console.log(`[CronJob] Hard-expired: ${food.name} (${food._id})`);
-                } else if (now >= expiry && !food.is_expired) {
-                    food.is_expired = true;
-                    await food.save();
-                    console.log(`[CronJob] Soft-expired: ${food.name} (${food._id})`);
+                if (nowMs >= hardExpiry) {
+                    await supabase
+                        .from("foods")
+                        .update({ hard_expired: true, realtime_status: "Not Available" })
+                        .eq("id", food.id);
+                    console.log(`[CronJob] Hard-expired food: ${food.id}`);
+                } else if (nowMs >= softExpiry && !food.is_expired) {
+                    await supabase
+                        .from("foods")
+                        .update({ is_expired: true })
+                        .eq("id", food.id);
+                    console.log(`[CronJob] Soft-expired food: ${food.id}`);
                 }
             }
         } catch (err) {
-            console.error("[CronJob] Error in food expiry job:", err.message);
+            console.error("[CronJob] Error:", err.message);
         }
     });
 
